@@ -70,9 +70,16 @@
   },
   "peerDependencies": {
     "effect": "workspace:^",
-    "ioredis": "^5.7.0"
+    "ioredis": "^5.7.0",
+    "playwright": "^1.59.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "playwright": "^1.59.1",
     "@testcontainers/mysql": "^11.14.0",
     "@testcontainers/postgresql": "^11.14.0",
     "@testcontainers/redis": "^11.14.0",
