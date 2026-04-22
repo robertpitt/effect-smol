@@ -56,6 +56,25 @@ const withTimeout = (timeout: Duration.Input | undefined): { timeout: number } =
   timeout: toDefaultTimeoutMs(timeout)
 })
 
+const withWaitForOptions = (
+  options: BrowserLocator.WaitForOptions | undefined
+): { timeout: number; state?: "attached" | "detached" | "visible" | "hidden" } => {
+  const waitOptions: {
+    timeout: number
+    state?: "attached" | "detached" | "visible" | "hidden"
+  } = {
+    timeout: toDefaultTimeoutMs(options?.timeout)
+  }
+  if (options?.state !== undefined) {
+    waitOptions.state = options.state
+  }
+  return waitOptions
+}
+
+const toExactOptions = (
+  options: BrowserLocator.BrowserExactTextOptions | undefined
+): { exact?: boolean } | undefined => options?.exact === true ? { exact: true } : undefined
+
 const toTarget = (url: string | URL): string => typeof url === "string" ? url : url.toString()
 
 const toPressOptions = (
@@ -74,12 +93,13 @@ const toWaitUntilOptions = (
   options:
     | BrowserPage.GotoOptions
     | BrowserPage.ReloadOptions
+    | BrowserPage.GoBackOptions
     | BrowserPage.WaitForURLOptions
     | undefined
-): { timeout: number; waitUntil?: BrowserPage.BrowserWaitUntil } => {
+): { timeout: number; waitUntil?: BrowserPage.BrowserNavigationWaitUntil } => {
   const waitOptions: {
     timeout: number
-    waitUntil?: BrowserPage.BrowserWaitUntil
+    waitUntil?: BrowserPage.BrowserNavigationWaitUntil
   } = {
     timeout: toDefaultTimeoutMs(options?.timeout)
   }
@@ -226,91 +246,279 @@ const mapWaitForLoadStateFailure = (cause: unknown): BrowserError.BrowserError =
     }) :
     mapUnknown("page.waitForLoadState", cause)
 
-const makeLocator = (locator: Locator, selector: string): BrowserLocator.BrowserLocator =>
-  BrowserLocator.make({
-    locator: (childSelector) =>
-      makeLocator(locator.locator(childSelector), `${selector} ${childSelector}`),
-    nth: (index) => makeLocator(locator.nth(index), selector),
+interface PlaywrightLocatorPrimitive extends BrowserLocator.BrowserLocatorPrimitive {
+  readonly current: Locator
+  readonly selector: string
+}
+
+const toPlaywrightLocatorPrimitive = (self: BrowserLocator.BrowserLocator): PlaywrightLocatorPrimitive =>
+  BrowserLocator.toPrimitive(self) as PlaywrightLocatorPrimitive
+
+const describeTextMatcher = (matcher: BrowserLocator.BrowserTextMatcher): string =>
+  typeof matcher === "string" ? JSON.stringify(matcher) : matcher.toString()
+
+const describeExactOptions = (options: BrowserLocator.BrowserExactTextOptions | undefined): string =>
+  options?.exact === true ? ", exact: true" : ""
+
+const describeRoleOptions = (options: BrowserLocator.GetByRoleOptions | undefined): string => {
+  const parts: Array<string> = []
+  if (options?.name !== undefined) {
+    parts.push(`name: ${describeTextMatcher(options.name)}`)
+  }
+  if (options?.exact === true) {
+    parts.push("exact: true")
+  }
+  return parts.length === 0 ? "" : `, { ${parts.join(", ")} }`
+}
+
+const describeFilterOptions = (options: BrowserLocator.BrowserLocatorFilterOptions): string => {
+  const parts: Array<string> = []
+  if (options.has !== undefined) {
+    parts.push(`has: ${toPlaywrightLocatorPrimitive(options.has).selector}`)
+  }
+  if (options.hasNot !== undefined) {
+    parts.push(`hasNot: ${toPlaywrightLocatorPrimitive(options.hasNot).selector}`)
+  }
+  if (options.hasText !== undefined) {
+    parts.push(`hasText: ${describeTextMatcher(options.hasText)}`)
+  }
+  if (options.hasNotText !== undefined) {
+    parts.push(`hasNotText: ${describeTextMatcher(options.hasNotText)}`)
+  }
+  if (options.visible !== undefined) {
+    parts.push(`visible: ${String(options.visible)}`)
+  }
+  return parts.join(", ")
+}
+
+const toFilterOptions = (
+  options: BrowserLocator.BrowserLocatorFilterOptions
+): {
+  has?: Locator
+  hasNot?: Locator
+  hasText?: BrowserLocator.BrowserTextMatcher
+  hasNotText?: BrowserLocator.BrowserTextMatcher
+  visible?: boolean
+} => {
+  const filterOptions: {
+    has?: Locator
+    hasNot?: Locator
+    hasText?: BrowserLocator.BrowserTextMatcher
+    hasNotText?: BrowserLocator.BrowserTextMatcher
+    visible?: boolean
+  } = {}
+  if (options.has !== undefined) {
+    filterOptions.has = toPlaywrightLocatorPrimitive(options.has).current
+  }
+  if (options.hasNot !== undefined) {
+    filterOptions.hasNot = toPlaywrightLocatorPrimitive(options.hasNot).current
+  }
+  if (options.hasText !== undefined) {
+    filterOptions.hasText = options.hasText
+  }
+  if (options.hasNotText !== undefined) {
+    filterOptions.hasNotText = options.hasNotText
+  }
+  if (options.visible !== undefined) {
+    filterOptions.visible = options.visible
+  }
+  return filterOptions
+}
+
+const fromSelectorArg = (
+  selector: string | BrowserLocator.BrowserLocator
+): { readonly locator: string | Locator; readonly description: string } =>
+  typeof selector === "string" ?
+    { locator: selector, description: selector } :
+    {
+      locator: toPlaywrightLocatorPrimitive(selector).current,
+      description: toPlaywrightLocatorPrimitive(selector).selector
+    }
+
+const runLocatorVoid = (
+  selector: string,
+  operation: BrowserError.BrowserElementError["browserOperation"],
+  run: () => Promise<unknown>,
+  reason?: BrowserError.BrowserElementError["reason"]
+): Effect.Effect<void, BrowserError.BrowserError> =>
+  tryVoid({
+    try: run,
+    catch: (cause) => mapLocatorFailure(operation, selector, cause, reason)
+  })
+
+const runLocatorEffect = <A>(
+  selector: string,
+  operation: BrowserError.BrowserElementError["browserOperation"],
+  run: () => Promise<A>,
+  reason?: BrowserError.BrowserElementError["reason"]
+): Effect.Effect<A, BrowserError.BrowserError> =>
+  Effect.tryPromise({
+    try: run,
+    catch: (cause) => mapLocatorFailure(operation, selector, cause, reason)
+  })
+
+const makeLocatorRef = (current: Locator, selector: string): BrowserLocator.BrowserLocator =>
+  BrowserLocator.make(makeLocatorPrimitive(current, selector))
+
+function makeLocatorPrimitive(current: Locator, selector: string): PlaywrightLocatorPrimitive {
+  return {
+    current,
+    selector,
+    locator: (next) => {
+      const resolved = fromSelectorArg(next)
+      return makeLocatorRef(current.locator(resolved.locator), `${selector} >> ${resolved.description}`)
+    },
+    getByRole: (role, options) =>
+      makeLocatorRef(
+        current.getByRole(role as never, {
+          ...(options?.name !== undefined ? { name: options.name } : undefined),
+          ...(toExactOptions(options) ?? undefined)
+        }),
+        `${selector} >> role=${role}${describeRoleOptions(options)}`
+      ),
+    getByText: (text, options) =>
+      makeLocatorRef(
+        current.getByText(text, toExactOptions(options)),
+        `${selector} >> text=${describeTextMatcher(text)}${describeExactOptions(options)}`
+      ),
+    getByLabel: (text, options) =>
+      makeLocatorRef(
+        current.getByLabel(text, toExactOptions(options)),
+        `${selector} >> label=${describeTextMatcher(text)}${describeExactOptions(options)}`
+      ),
+    getByPlaceholder: (text, options) =>
+      makeLocatorRef(
+        current.getByPlaceholder(text, toExactOptions(options)),
+        `${selector} >> placeholder=${describeTextMatcher(text)}${describeExactOptions(options)}`
+      ),
+    getByAltText: (text, options) =>
+      makeLocatorRef(
+        current.getByAltText(text, toExactOptions(options)),
+        `${selector} >> alt=${describeTextMatcher(text)}${describeExactOptions(options)}`
+      ),
+    getByTitle: (text, options) =>
+      makeLocatorRef(
+        current.getByTitle(text, toExactOptions(options)),
+        `${selector} >> title=${describeTextMatcher(text)}${describeExactOptions(options)}`
+      ),
+    getByTestId: (testId) =>
+      makeLocatorRef(
+        current.getByTestId(testId as never),
+        `${selector} >> testId=${describeTextMatcher(testId)}`
+      ),
+    filter: (options) =>
+      makeLocatorRef(
+        current.filter(toFilterOptions(options)),
+        `${selector} >> filter(${describeFilterOptions(options)})`
+      ),
+    and: (that) => {
+      const other = toPlaywrightLocatorPrimitive(that)
+      return makeLocatorRef(current.and(other.current), `${selector} && ${other.selector}`)
+    },
+    or: (that) => {
+      const other = toPlaywrightLocatorPrimitive(that)
+      return makeLocatorRef(current.or(other.current), `${selector} || ${other.selector}`)
+    },
+    first: () => makeLocatorRef(current.first(), `${selector} >> first()`),
+    last: () => makeLocatorRef(current.last(), `${selector} >> last()`),
+    nth: (index) => makeLocatorRef(current.nth(index), `${selector} >> nth(${String(index)})`),
     click: (options) =>
-      tryVoid({
-        try: () => locator.click(withTimeout(options?.timeout)),
-        catch: (cause) => mapLocatorFailure("locator.click", selector, cause)
-      }),
+      runLocatorVoid(selector, "locator.click", () => current.click(withTimeout(options?.timeout))),
     fill: (value, options) =>
       Effect.gen(function*() {
         const timeout = toDefaultTimeoutMs(options?.timeout)
         if (options?.clear === true) {
           yield* Effect.tryPromise({
-            try: () => locator.clear({ timeout }),
+            try: () => current.clear({ timeout }),
             catch: (cause) => mapLocatorFailure("locator.fill", selector, cause, "notActionable")
           })
         }
         yield* Effect.tryPromise({
-          try: () => locator.fill(value, { timeout }),
+          try: () => current.fill(value, { timeout }),
           catch: (cause) => mapLocatorFailure("locator.fill", selector, cause)
         })
         return undefined
       }),
     press: (key, options) =>
-      tryVoid({
-        try: () => locator.press(key, toPressOptions(options)),
-        catch: (cause) => mapLocatorFailure("locator.press", selector, cause)
-      }),
+      runLocatorVoid(selector, "locator.press", () => current.press(key, toPressOptions(options))),
     hover: (options) =>
-      tryVoid({
-        try: () => locator.hover(withTimeout(options?.timeout)),
-        catch: (cause) => mapLocatorFailure("locator.hover", selector, cause)
-      }),
+      runLocatorVoid(selector, "locator.hover", () => current.hover(withTimeout(options?.timeout))),
     scrollIntoViewIfNeeded: (options) =>
-      tryVoid({
-        try: () => locator.scrollIntoViewIfNeeded(withTimeout(options?.timeout)),
-        catch: (cause) => mapLocatorFailure("locator.scrollIntoViewIfNeeded", selector, cause)
-      }),
+      runLocatorVoid(
+        selector,
+        "locator.scrollIntoViewIfNeeded",
+        () => current.scrollIntoViewIfNeeded(withTimeout(options?.timeout))
+      ),
     waitFor: (options) =>
-      tryVoid({
-        try: () => locator.waitFor(withTimeout(options?.timeout)),
-        catch: (cause) => mapLocatorFailure("locator.waitFor", selector, cause, "notFound")
-      }),
-    text: (options) =>
-      Effect.tryPromise({
-        try: () => locator.textContent(withTimeout(options?.timeout)).then((value) => value ?? ""),
-        catch: (cause) => mapLocatorFailure("locator.text", selector, cause)
-      }),
+      runLocatorVoid(
+        selector,
+        "locator.waitFor",
+        () => current.waitFor(withWaitForOptions(options)),
+        "notFound"
+      ),
+    textContent: (options) =>
+      runLocatorEffect(
+        selector,
+        "locator.text",
+        () => current.textContent(withTimeout(options?.timeout)).then((value) => value ?? "")
+      ),
     innerText: (options) =>
-      Effect.tryPromise({
-        try: () => locator.innerText(withTimeout(options?.timeout)),
-        catch: (cause) => mapLocatorFailure("locator.innerText", selector, cause)
-      }),
+      runLocatorEffect(selector, "locator.innerText", () => current.innerText(withTimeout(options?.timeout))),
     attribute: (name, options) =>
-      Effect.tryPromise({
-        try: () => locator.getAttribute(name, withTimeout(options?.timeout)),
-        catch: (cause) => mapLocatorFailure("locator.attribute", selector, cause)
-      }),
-    count: Effect.tryPromise({
-      try: () => locator.count(),
-      catch: (cause) =>
-        new BrowserError.BrowserElementError({
-          browserOperation: "locator.count",
-          selector,
-          reason: "other",
-          cause,
-          description: toErrorMessage(cause)
-        })
-    }),
-    allText: (options) =>
-      Effect.tryPromise({
-        try: () =>
-          locator.count().then((count) =>
-            Promise.all(
-              Array.from(
-                { length: count },
-                (_, index) => locator.nth(index).innerText(withTimeout(options?.timeout))
-              )
+      runLocatorEffect(
+        selector,
+        "locator.attribute",
+        () => current.getAttribute(name, withTimeout(options?.timeout))
+      ),
+    count: runLocatorEffect(selector, "locator.count", () => current.count()),
+    allTextContents: (options) =>
+      runLocatorEffect(selector, "locator.allText", () =>
+        current.count().then((count) =>
+          Promise.all(
+            Array.from(
+              { length: count },
+              (_, index) => current.nth(index).textContent(withTimeout(options?.timeout)).then((value) => value ?? "")
             )
-          ),
-        catch: (cause) => mapLocatorFailure("locator.allText", selector, cause)
-      })
-  })
+          )
+        ))
+  }
+}
+
+const makePageLocator = (page: Page, selector: string | BrowserLocator.BrowserLocator): BrowserLocator.BrowserLocator => {
+  const resolved = fromSelectorArg(selector)
+  return makeLocatorRef(page.locator(resolved.locator as never), resolved.description)
+}
+
+const getByRole = (page: Page, role: string, options?: BrowserLocator.GetByRoleOptions | undefined) =>
+  makeLocatorRef(page.getByRole(role as never, {
+    ...(options?.name !== undefined ? { name: options.name } : undefined),
+    ...(toExactOptions(options) ?? undefined)
+  }), `role=${role}${describeRoleOptions(options)}`)
+
+const getByText = (page: Page, text: BrowserLocator.BrowserTextMatcher, options?: BrowserLocator.BrowserExactTextOptions) =>
+  makeLocatorRef(page.getByText(text, toExactOptions(options)), `text=${describeTextMatcher(text)}${describeExactOptions(options)}`)
+
+const getByLabel = (page: Page, text: BrowserLocator.BrowserTextMatcher, options?: BrowserLocator.BrowserExactTextOptions) =>
+  makeLocatorRef(page.getByLabel(text, toExactOptions(options)), `label=${describeTextMatcher(text)}${describeExactOptions(options)}`)
+
+const getByPlaceholder = (
+  page: Page,
+  text: BrowserLocator.BrowserTextMatcher,
+  options?: BrowserLocator.BrowserExactTextOptions
+) =>
+  makeLocatorRef(
+    page.getByPlaceholder(text, toExactOptions(options)),
+    `placeholder=${describeTextMatcher(text)}${describeExactOptions(options)}`
+  )
+
+const getByAltText = (page: Page, text: BrowserLocator.BrowserTextMatcher, options?: BrowserLocator.BrowserExactTextOptions) =>
+  makeLocatorRef(page.getByAltText(text, toExactOptions(options)), `alt=${describeTextMatcher(text)}${describeExactOptions(options)}`)
+
+const getByTitle = (page: Page, text: BrowserLocator.BrowserTextMatcher, options?: BrowserLocator.BrowserExactTextOptions) =>
+  makeLocatorRef(page.getByTitle(text, toExactOptions(options)), `title=${describeTextMatcher(text)}${describeExactOptions(options)}`)
+
+const getByTestId = (page: Page, testId: BrowserLocator.BrowserTextMatcher) =>
+  makeLocatorRef(page.getByTestId(testId as never), `testId=${describeTextMatcher(testId)}`)
 
 const makePage = (page: Page): Effect.Effect<BrowserPage.BrowserPage> =>
   Effect.gen(function*() {
@@ -328,7 +536,14 @@ const makePage = (page: Page): Effect.Effect<BrowserPage.BrowserPage> =>
     })
 
     return BrowserPage.make({
-      locator: (selector) => makeLocator(page.locator(selector), selector),
+      locator: (selector) => makePageLocator(page, selector),
+      getByRole: (role, options) => getByRole(page, role, options),
+      getByText: (text, options) => getByText(page, text, options),
+      getByLabel: (text, options) => getByLabel(page, text, options),
+      getByPlaceholder: (text, options) => getByPlaceholder(page, text, options),
+      getByAltText: (text, options) => getByAltText(page, text, options),
+      getByTitle: (text, options) => getByTitle(page, text, options),
+      getByTestId: (testId) => getByTestId(page, testId),
       goto: (url, options) => {
         const target = toTarget(url)
         return tryVoid({
@@ -343,7 +558,7 @@ const makePage = (page: Page): Effect.Effect<BrowserPage.BrowserPage> =>
         }),
       goBack: (options) =>
         tryVoid({
-          try: () => page.goBack(withTimeout(options?.timeout)),
+          try: () => page.goBack(toWaitUntilOptions(options)),
           catch: (cause) => mapNavigationFailure("page.goBack", page.url(), cause)
         }),
       waitForURL: (url, options) => {
@@ -355,13 +570,7 @@ const makePage = (page: Page): Effect.Effect<BrowserPage.BrowserPage> =>
       },
       waitForLoadState: (state, options) =>
         tryVoid({
-          try: () =>
-            (page.waitForLoadState as (
-              state: BrowserPage.BrowserLoadState,
-              options: { timeout: number }
-            ) => Promise<void>)(state, {
-              timeout: toDefaultTimeoutMs(options?.timeout)
-            }),
+          try: () => page.waitForLoadState(state, { timeout: toDefaultTimeoutMs(options?.timeout) }),
           catch: mapWaitForLoadStateFailure
         }),
       title: Effect.tryPromise({

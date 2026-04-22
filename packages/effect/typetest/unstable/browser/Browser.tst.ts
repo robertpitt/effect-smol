@@ -64,14 +64,61 @@ describe("BrowserPage", () => {
       >
     >()
   })
+
+  it("supports semantic locator builders", () => {
+    const role = page.getByRole("button", { name: "Save" })
+    const text = page.getByText("Confirm")
+    const label = page.getByLabel("Email")
+    const placeholder = page.getByPlaceholder("name@example.com")
+    const alt = page.getByAltText("Avatar")
+    const title = page.getByTitle("Settings")
+    const testId = page.getByTestId("dialog")
+
+    expect(role).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(text).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(label).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(placeholder).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(alt).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(title).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(testId).type.toBe<BrowserLocator.BrowserLocator>()
+  })
+
+  it("separates navigation waitUntil from load state", () => {
+    const navigation = page.goto("https://example.test/", { waitUntil: "commit" })
+    const loadState = page.waitForLoadState("load")
+
+    expect(navigation).type.toBe<Effect.Effect<void, BrowserError.BrowserError>>()
+    expect(loadState).type.toBe<Effect.Effect<void, BrowserError.BrowserError>>()
+
+    // @ts-expect-error Argument of type '"commit"' is not assignable to parameter of type 'BrowserLoadState'.
+    page.waitForLoadState("commit")
+  })
 })
 
 describe("BrowserLocator", () => {
-  it("supports scoped locator chaining", () => {
-    const locator = page.locator("#card")
-    const nested = locator.locator(".title")
+  it("supports semantic composition", () => {
+    const locator = page.getByRole("listitem")
+    const nested = locator.getByRole("button", { name: "Add to cart" })
+    const filtered = locator.filter({ hasText: "Product 2" })
+    const intersected = page.getByRole("button").and(page.getByTitle("Subscribe"))
+    const alternative = page.getByRole("button", { name: "New" }).or(page.getByText("Dialog"))
+    const escaped = locator.locator(page.getByText("Child"))
 
     expect(locator).type.toBe<BrowserLocator.BrowserLocator>()
     expect(nested).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(filtered).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(intersected).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(alternative).type.toBe<BrowserLocator.BrowserLocator>()
+    expect(escaped).type.toBe<BrowserLocator.BrowserLocator>()
+  })
+
+  it("exposes canonical read APIs", () => {
+    const effect = page.getByText("Hello").textContent()
+    const many = page.getByRole("listitem").allTextContents()
+    const waited = page.getByText("Hello").waitFor({ state: "visible" })
+
+    expect(effect).type.toBe<Effect.Effect<string, BrowserError.BrowserError>>()
+    expect(many).type.toBe<Effect.Effect<ReadonlyArray<string>, BrowserError.BrowserError>>()
+    expect(waited).type.toBe<Effect.Effect<void, BrowserError.BrowserError>>()
   })
 })

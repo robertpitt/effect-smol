@@ -9,7 +9,7 @@ import * as Predicate from "../../Predicate.ts"
 import * as Schema from "../../Schema.ts"
 import type { Top } from "../../Schema.ts"
 import type * as BrowserError from "./BrowserError.ts"
-import type { BrowserLocator } from "./BrowserLocator.ts"
+import type * as BrowserLocator from "./BrowserLocator.ts"
 
 /**
  * @since 4.0.0
@@ -27,20 +27,20 @@ export const isBrowserPage = (u: unknown): u is BrowserPage => Predicate.hasProp
  * @since 4.0.0
  * @category models
  */
-export type BrowserWaitUntil = "load" | "domcontentloaded" | "networkidle"
+export type BrowserNavigationWaitUntil = "load" | "domcontentloaded" | "networkidle" | "commit"
 
 /**
  * @since 4.0.0
  * @category models
  */
-export type BrowserLoadState = BrowserWaitUntil | "commit"
+export type BrowserLoadState = "load" | "domcontentloaded" | "networkidle"
 
 /**
  * @since 4.0.0
  * @category models
  */
 export interface GotoOptions {
-  readonly waitUntil?: BrowserWaitUntil | undefined
+  readonly waitUntil?: BrowserNavigationWaitUntil | undefined
   readonly timeout?: Duration.Input | undefined
 }
 
@@ -49,7 +49,7 @@ export interface GotoOptions {
  * @category models
  */
 export interface ReloadOptions {
-  readonly waitUntil?: BrowserWaitUntil | undefined
+  readonly waitUntil?: BrowserNavigationWaitUntil | undefined
   readonly timeout?: Duration.Input | undefined
 }
 
@@ -58,6 +58,7 @@ export interface ReloadOptions {
  * @category models
  */
 export interface GoBackOptions {
+  readonly waitUntil?: BrowserNavigationWaitUntil | undefined
   readonly timeout?: Duration.Input | undefined
 }
 
@@ -67,7 +68,7 @@ export interface GoBackOptions {
  */
 export interface WaitForURLOptions {
   readonly timeout?: Duration.Input | undefined
-  readonly waitUntil?: BrowserWaitUntil | undefined
+  readonly waitUntil?: BrowserNavigationWaitUntil | undefined
 }
 
 /**
@@ -95,7 +96,39 @@ export interface ScreenshotOptions {
 export interface BrowserPage extends Pipeable {
   readonly [TypeId]: typeof TypeId
 
-  readonly locator: (selector: string) => BrowserLocator
+  readonly locator: (selector: string | BrowserLocator.BrowserLocator) => BrowserLocator.BrowserLocator
+
+  readonly getByRole: (
+    role: string,
+    options?: BrowserLocator.GetByRoleOptions | undefined
+  ) => BrowserLocator.BrowserLocator
+
+  readonly getByText: (
+    text: BrowserLocator.BrowserTextMatcher,
+    options?: BrowserLocator.BrowserExactTextOptions | undefined
+  ) => BrowserLocator.BrowserLocator
+
+  readonly getByLabel: (
+    text: BrowserLocator.BrowserTextMatcher,
+    options?: BrowserLocator.BrowserExactTextOptions | undefined
+  ) => BrowserLocator.BrowserLocator
+
+  readonly getByPlaceholder: (
+    text: BrowserLocator.BrowserTextMatcher,
+    options?: BrowserLocator.BrowserExactTextOptions | undefined
+  ) => BrowserLocator.BrowserLocator
+
+  readonly getByAltText: (
+    text: BrowserLocator.BrowserTextMatcher,
+    options?: BrowserLocator.BrowserExactTextOptions | undefined
+  ) => BrowserLocator.BrowserLocator
+
+  readonly getByTitle: (
+    text: BrowserLocator.BrowserTextMatcher,
+    options?: BrowserLocator.BrowserExactTextOptions | undefined
+  ) => BrowserLocator.BrowserLocator
+
+  readonly getByTestId: (testId: BrowserLocator.BrowserTextMatcher) => BrowserLocator.BrowserLocator
 
   readonly goto: (
     url: string | URL,

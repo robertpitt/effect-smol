@@ -40,6 +40,13 @@ type Store = {
   nextPageId: number
 }
 
+type FakeLocatorIndex = number | "last" | undefined
+
+interface FakeLocatorPrimitive extends BrowserLocator.BrowserLocatorPrimitive {
+  readonly selector: string
+  readonly index: FakeLocatorIndex
+}
+
 const makeStore = (routes: Readonly<Record<string, RouteHit>>): Store => ({
   routes,
   contexts: {},
@@ -121,10 +128,77 @@ const textValues = (page: PageRec, selector: string): ReadonlyArray<string> => {
   return [page.texts[selector] ?? ""]
 }
 
-const nthValue = (values: ReadonlyArray<string>, index: number): string | undefined =>
-  index >= 0 && index < values.length ? values[index] : undefined
+const resolveIndex = (index: FakeLocatorIndex, count: number): number | undefined => {
+  if (index === undefined) {
+    return undefined
+  }
+  if (index === "last") {
+    return count > 0 ? count - 1 : undefined
+  }
+  return index >= 0 && index < count ? index : undefined
+}
+
+const resolveText = (page: PageRec, selector: string, index: FakeLocatorIndex): string => {
+  const values = textValues(page, selector)
+  const resolved = resolveIndex(index, values.length)
+  return resolved === undefined ? values[0] ?? "" : values[resolved] ?? ""
+}
+
+const resolveTextList = (page: PageRec, selector: string, index: FakeLocatorIndex): ReadonlyArray<string> => {
+  const values = textValues(page, selector)
+  const resolved = resolveIndex(index, values.length)
+  return resolved === undefined ? values : resolved < values.length ? [values[resolved]!] : []
+}
+
+const resolveCount = (page: PageRec, selector: string, index: FakeLocatorIndex): number => {
+  const count = countMatches(page, selector)
+  return index === undefined ? count : resolveIndex(index, count) === undefined ? 0 : 1
+}
 
 const firstContext = (store: Store): ContextRec => Object.values(store.contexts)[0]!
+
+const toFakePrimitive = (self: BrowserLocator.BrowserLocator): FakeLocatorPrimitive =>
+  BrowserLocator.toPrimitive(self) as FakeLocatorPrimitive
+
+const describeTextMatcher = (matcher: BrowserLocator.BrowserTextMatcher): string =>
+  typeof matcher === "string" ? JSON.stringify(matcher) : matcher.toString()
+
+const describeExactOptions = (options: BrowserLocator.BrowserExactTextOptions | undefined): string =>
+  options?.exact === true ? ", exact: true" : ""
+
+const describeRoleOptions = (options: BrowserLocator.GetByRoleOptions | undefined): string => {
+  const parts: Array<string> = []
+  if (options?.name !== undefined) {
+    parts.push(`name: ${describeTextMatcher(options.name)}`)
+  }
+  if (options?.exact === true) {
+    parts.push("exact: true")
+  }
+  return parts.length === 0 ? "" : `, { ${parts.join(", ")} }`
+}
+
+const describeFilterOptions = (options: BrowserLocator.BrowserLocatorFilterOptions): string => {
+  const parts: Array<string> = []
+  if (options.has !== undefined) {
+    parts.push(`has: ${toFakePrimitive(options.has).selector}`)
+  }
+  if (options.hasNot !== undefined) {
+    parts.push(`hasNot: ${toFakePrimitive(options.hasNot).selector}`)
+  }
+  if (options.hasText !== undefined) {
+    parts.push(`hasText: ${describeTextMatcher(options.hasText)}`)
+  }
+  if (options.hasNotText !== undefined) {
+    parts.push(`hasNotText: ${describeTextMatcher(options.hasNotText)}`)
+  }
+  if (options.visible !== undefined) {
+    parts.push(`visible: ${String(options.visible)}`)
+  }
+  return parts.join(", ")
+}
+
+const fromSelectorArg = (selector: string | BrowserLocator.BrowserLocator): string =>
+  typeof selector === "string" ? selector : toFakePrimitive(selector).selector
 
 const makeFakeBrowserDriver = (routes: Readonly<Record<string, RouteHit>>) => {
   const store = makeStore(routes)
@@ -162,110 +236,131 @@ const makeFakeBrowserDriver = (routes: Readonly<Record<string, RouteHit>>) => {
             return pageRec
           })()
 
-        const makeLocator = (
-          selector: string,
-          rootSelector: string = "",
-          index: number | undefined = undefined
-        ): BrowserLocator.BrowserLocator => {
-          const resolvedSelector = rootSelector === "" ? selector : `${rootSelector} ${selector}`
+        const makeLocator = (selector: string, index: FakeLocatorIndex = undefined): BrowserLocator.BrowserLocator => {
           const getLocatorPage = (
             operation: BrowserError.BrowserElementError["browserOperation"]
           ) =>
             Effect.fnUntraced(function*() {
               const page = yield* getPage(operation)
-              const count = countMatches(page, resolvedSelector)
-              if (index !== undefined) {
-                if (index < 0 || index >= count) {
-                  return yield* Effect.fail(
-                    new BrowserError.BrowserElementError({
-                      browserOperation: operation,
-                      selector: resolvedSelector,
-                      reason: "notFound",
-                      description: "locator index out of range"
-                    })
-                  )
-                }
-              } else if (count === 0) {
+              const count = countMatches(page, selector)
+              if (count === 0 || (index !== undefined && resolveIndex(index, count) === undefined)) {
                 return yield* Effect.fail(
                   new BrowserError.BrowserElementError({
                     browserOperation: operation,
-                    selector: resolvedSelector,
+                    selector,
                     reason: "notFound",
                     description: "selector not present"
                   })
                 )
               }
               return page
-          })()
+            })()
 
-          return BrowserLocator.make({
-            locator: (childSelector) => makeLocator(childSelector, resolvedSelector),
-            nth: (nextIndex) => makeLocator(selector, rootSelector, nextIndex),
+          const primitive: FakeLocatorPrimitive = {
+            selector,
+            index,
+            locator: (childSelector) => makeLocator(`${selector} >> ${fromSelectorArg(childSelector)}`),
+            getByRole: (role, options) => makeLocator(`${selector} >> role=${role}${describeRoleOptions(options)}`),
+            getByText: (text, options) =>
+              makeLocator(`${selector} >> text=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+            getByLabel: (text, options) =>
+              makeLocator(`${selector} >> label=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+            getByPlaceholder: (text, options) =>
+              makeLocator(`${selector} >> placeholder=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+            getByAltText: (text, options) =>
+              makeLocator(`${selector} >> alt=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+            getByTitle: (text, options) =>
+              makeLocator(`${selector} >> title=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+            getByTestId: (testId) => makeLocator(`${selector} >> testId=${describeTextMatcher(testId)}`),
+            filter: (options) => makeLocator(`${selector} >> filter(${describeFilterOptions(options)})`),
+            and: (that) => makeLocator(`${selector} && ${toFakePrimitive(that).selector}`),
+            or: (that) => makeLocator(`${selector} || ${toFakePrimitive(that).selector}`),
+            first: () => makeLocator(selector, 0),
+            last: () => makeLocator(selector, "last"),
+            nth: (nextIndex) => makeLocator(selector, nextIndex),
             click: () => getLocatorPage("locator.click").pipe(Effect.asVoid),
             fill: () => getLocatorPage("locator.fill").pipe(Effect.asVoid),
             press: () => getLocatorPage("locator.press").pipe(Effect.asVoid),
             hover: () => getLocatorPage("locator.hover").pipe(Effect.asVoid),
             scrollIntoViewIfNeeded: () => getLocatorPage("locator.scrollIntoViewIfNeeded").pipe(Effect.asVoid),
-            waitFor: () =>
+            waitFor: (options) =>
               Effect.fnUntraced(function*() {
                 const page = yield* getPage("locator.waitFor")
-                if (countMatches(page, resolvedSelector) === 0) {
-                  return yield* Effect.fail(
-                    new BrowserError.BrowserTimeoutError({
-                      browserOperation: "locator.waitFor",
-                      selector: resolvedSelector,
-                      description: "selector not present"
-                    })
-                  )
+                const count = countMatches(page, selector)
+                const visible = count > 0 && (index === undefined || resolveIndex(index, count) !== undefined)
+                switch (options?.state) {
+                  case "detached":
+                  case "hidden": {
+                    if (visible) {
+                      return yield* Effect.fail(
+                        new BrowserError.BrowserTimeoutError({
+                          browserOperation: "locator.waitFor",
+                          selector,
+                          description: "selector still present"
+                        })
+                      )
+                    }
+                    return undefined
+                  }
+                  default: {
+                    if (!visible) {
+                      return yield* Effect.fail(
+                        new BrowserError.BrowserTimeoutError({
+                          browserOperation: "locator.waitFor",
+                          selector,
+                          description: "selector not present"
+                        })
+                      )
+                    }
+                    return undefined
+                  }
                 }
-                if (index !== undefined && (index < 0 || index >= countMatches(page, resolvedSelector))) {
-                  return yield* Effect.fail(
-                    new BrowserError.BrowserTimeoutError({
-                      browserOperation: "locator.waitFor",
-                      selector: resolvedSelector,
-                      description: "locator index out of range"
-                    })
-                  )
-                }
-                return undefined
               })(),
-            text: () =>
+            textContent: () =>
               Effect.fnUntraced(function*() {
                 const page = yield* getLocatorPage("locator.text")
-                const values = textValues(page, resolvedSelector)
-                return index === undefined ? values[0] ?? "" : nthValue(values, index) ?? ""
+                return resolveText(page, selector, index)
               })(),
             innerText: () =>
               Effect.fnUntraced(function*() {
                 const page = yield* getLocatorPage("locator.innerText")
-                const values = textValues(page, resolvedSelector)
-                return index === undefined ? values[0] ?? "" : nthValue(values, index) ?? ""
+                return resolveText(page, selector, index)
               })(),
             attribute: (name) =>
               Effect.fnUntraced(function*() {
                 const page = yield* getLocatorPage("locator.attribute")
-                return page.attrs[resolvedSelector]?.[name] ?? null
+                return page.attrs[selector]?.[name] ?? null
               })(),
             count: Effect.fnUntraced(function*() {
               const page = yield* getPage("locator.count")
-              const count = countMatches(page, resolvedSelector)
-              return index === undefined ? count : index >= 0 && index < count ? 1 : 0
+              return resolveCount(page, selector, index)
             })(),
-            allText: () =>
+            allTextContents: () =>
               Effect.fnUntraced(function*() {
                 const page = yield* getPage("locator.allText")
-                const values = textValues(page, resolvedSelector)
-                if (index === undefined) {
-                  return values
-                }
-                const value = nthValue(values, index)
-                return value === undefined ? [] : [value]
+                return resolveTextList(page, selector, index)
               })()
-          })
+          }
+
+          return BrowserLocator.make(primitive)
         }
 
+        const getPageLocator = (selector: string) => makeLocator(selector)
+
         return BrowserPage.make({
-          locator: (selector) => makeLocator(selector),
+          locator: (selector) => getPageLocator(fromSelectorArg(selector)),
+          getByRole: (role, options) => getPageLocator(`role=${role}${describeRoleOptions(options)}`),
+          getByText: (text, options) =>
+            getPageLocator(`text=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+          getByLabel: (text, options) =>
+            getPageLocator(`label=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+          getByPlaceholder: (text, options) =>
+            getPageLocator(`placeholder=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+          getByAltText: (text, options) =>
+            getPageLocator(`alt=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+          getByTitle: (text, options) =>
+            getPageLocator(`title=${describeTextMatcher(text)}${describeExactOptions(options)}`),
+          getByTestId: (testId) => getPageLocator(`testId=${describeTextMatcher(testId)}`),
           goto: (url) =>
             getPage("page.goto").pipe(Effect.andThen(Effect.sync(() => {
               const target = typeof url === "string" ? url : url.toString()
@@ -431,26 +526,47 @@ describe("unstable/browser", () => {
       assert.isTrue(Object.values(contextRec.pages)[0]!.closed)
     }))
 
-  it.effect("locator-first operations work", () =>
+  it.effect("semantic locators and composition work", () =>
     Effect.gen(function*() {
       const fake = makeFakeBrowserDriver({
         "https://example.test/": {
           title: "Locator",
           html: "<html></html>",
           texts: {
-            "#search": "Search",
-            "#hero": "Hero"
+            "label=\"Search\"": "Search",
+            "role=heading, { name: \"Hero\" }": "Hero",
+            "role=heading, { name: \"Hero\" } >> title=\"Hero title\"": "Hero title",
+            "testId=\"hero\"": "Hero",
+            "role=button && title=\"Subscribe\"": "Subscribe"
           },
           attrs: {
-            "#hero": {
+            "testId=\"hero\"": {
               "data-id": "42"
             }
           },
           textLists: {
-            ".item": ["Alpha", "Beta", "Gamma"]
+            "role=listitem": ["Product 1", "Product 2", "Product 3"],
+            "role=listitem >> filter(hasText: \"Product 2\")": ["Product 2"],
+            "role=listitem >> filter(hasText: \"Product 2\") >> role=button, { name: \"Add to cart\" }": [
+              "Add to cart"
+            ],
+            "role=listitem >> filter(visible: true)": ["Product 1", "Product 2"],
+            "role=listitem >> filter(has: testId=\"product-badge\")": ["Product 2"],
+            "role=listitem >> filter(hasNot: title=\"Archived\")": ["Product 1", "Product 2"],
+            "role=button, { name: \"New\" } || text=\"Confirm security settings\"": [
+              "New",
+              "Confirm security settings"
+            ]
           },
           matchCounts: {
-            ".item": 3
+            "role=listitem": 3,
+            "role=listitem >> filter(hasText: \"Product 2\")": 1,
+            "role=listitem >> filter(hasText: \"Product 2\") >> role=button, { name: \"Add to cart\" }": 1,
+            "role=listitem >> filter(visible: true)": 2,
+            "role=listitem >> filter(has: testId=\"product-badge\")": 1,
+            "role=listitem >> filter(hasNot: title=\"Archived\")": 2,
+            "role=button && title=\"Subscribe\"": 1,
+            "role=button, { name: \"New\" } || text=\"Confirm security settings\"": 2
           }
         }
       })
@@ -459,21 +575,29 @@ describe("unstable/browser", () => {
         Effect.gen(function*() {
           yield* page.goto("https://example.test/")
 
-          const search = page.locator("#search")
-          const items = page.locator(".item")
+          const search = page.getByLabel("Search")
+          const items = page.getByRole("listitem")
+          const newEmail = page.getByRole("button", { name: "New" })
+          const dialog = page.getByText("Confirm security settings")
 
-          yield* search.waitFor()
+          yield* search.waitFor({ state: "visible" })
           yield* search.fill("pizza")
-          yield* items.nth(1).click()
+          yield* items.filter({ hasText: "Product 2" }).getByRole("button", { name: "Add to cart" }).click()
 
           return {
-            heroText: yield* page.locator("#hero").text(),
-            heroInnerText: yield* page.locator("#hero").innerText(),
-            heroAttribute: yield* page.locator("#hero").attribute("data-id"),
-            itemText: yield* items.nth(1).innerText(),
+            heroText: yield* page.getByRole("heading", { name: "Hero" }).textContent(),
+            heroInnerText: yield* page.getByTestId("hero").innerText(),
+            heroAttribute: yield* page.getByTestId("hero").attribute("data-id"),
+            titleText: yield* page.getByRole("heading", { name: "Hero" }).getByTitle("Hero title").textContent(),
+            secondItem: yield* items.nth(1).innerText(),
+            lastItem: yield* items.last().innerText(),
             count: yield* items.count,
-            allText: yield* items.allText(),
-            secondAllText: yield* items.nth(1).allText()
+            allText: yield* items.allTextContents(),
+            filteredVisible: yield* items.filter({ visible: true }).allTextContents(),
+            filteredHas: yield* items.filter({ has: page.getByTestId("product-badge") }).allTextContents(),
+            filteredHasNot: yield* items.filter({ hasNot: page.getByTitle("Archived") }).allTextContents(),
+            intersection: yield* page.getByRole("button").and(page.getByTitle("Subscribe")).textContent(),
+            alternative: yield* newEmail.or(dialog).first().textContent()
           }
         })).pipe(Effect.provide(fake.layer))
 
@@ -481,51 +605,59 @@ describe("unstable/browser", () => {
         heroText: "Hero",
         heroInnerText: "Hero",
         heroAttribute: "42",
-        itemText: "Beta",
+        titleText: "Hero title",
+        secondItem: "Product 2",
+        lastItem: "Product 3",
         count: 3,
-        allText: ["Alpha", "Beta", "Gamma"],
-        secondAllText: ["Beta"]
+        allText: ["Product 1", "Product 2", "Product 3"],
+        filteredVisible: ["Product 1", "Product 2"],
+        filteredHas: ["Product 2"],
+        filteredHasNot: ["Product 1", "Product 2"],
+        intersection: "Subscribe",
+        alternative: "New"
       })
     }))
 
-  it.effect("locator.locator supports scoped lookup", () =>
+  it.effect("waitFor supports attached and hidden states", () =>
     Effect.gen(function*() {
       const fake = makeFakeBrowserDriver({
         "https://example.test/": {
-          title: "Scoped",
+          title: "Wait",
           html: "<html></html>",
           texts: {
-            "#card .title": "Pizza Shop",
-            "#card .status": "Open"
+            "text=\"Visible\"": "Visible"
           }
         }
       })
 
-      const values = yield* Browser.withPage(undefined, (page) =>
+      yield* Browser.withPage(undefined, (page) =>
         Effect.gen(function*() {
           yield* page.goto("https://example.test/")
-          const card = page.locator("#card")
-          const title = card.locator(".title")
-          const status = card.locator(".status")
-
-          yield* title.waitFor()
-          return {
-            title: yield* title.text(),
-            status: yield* status.text()
-          }
+          yield* page.getByText("Visible").waitFor({ state: "attached" })
+          yield* page.getByText("Missing").waitFor({ state: "hidden" })
         })).pipe(Effect.provide(fake.layer))
+    }))
 
-      assert.deepStrictEqual(values, {
-        title: "Pizza Shop",
-        status: "Open"
+  it.effect("navigation methods accept commit waitUntil", () =>
+    Effect.gen(function*() {
+      const fake = makeFakeBrowserDriver({
+        "https://example.test/": { title: "Commit", html: "<html></html>" }
       })
+
+      yield* Browser.withPage(undefined, (page) =>
+        Effect.gen(function*() {
+          yield* page.goto("https://example.test/", { waitUntil: "commit" })
+          yield* page.reload({ waitUntil: "commit" })
+          yield* page.goBack({ waitUntil: "commit" })
+          yield* page.waitForURL("https://example.test/", { waitUntil: "commit" })
+        })).pipe(Effect.provide(fake.layer))
     }))
 
   it.effect("locator failures use generic browser operations", () =>
     Effect.gen(function*() {
       const fake = makeFakeBrowserDriver({})
 
-      const error = yield* Browser.withPage(undefined, (page) => page.locator(".missing").click()).pipe(
+      const error = yield* Browser.withPage(undefined, (page) => page.getByText("missing").click()).pipe(
         Effect.flip,
         Effect.provide(fake.layer)
       )
@@ -628,7 +760,7 @@ describe("unstable/browser", () => {
           return yield* Effect.fail(
             new BrowserError.BrowserTimeoutError({
               browserOperation: "locator.waitFor",
-              selector: "#search"
+              selector: "text=\"Search\""
             })
           )
         }
@@ -643,7 +775,7 @@ describe("unstable/browser", () => {
         BrowserError.isRetryableDomError(
           new BrowserError.BrowserElementError({
             browserOperation: "locator.click",
-            selector: "#search",
+            selector: "text=\"Search\"",
             reason: "notFound"
           })
         )
