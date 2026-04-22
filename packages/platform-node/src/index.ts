@@ -67,6 +67,32 @@ export * as NodeMultipart from "./NodeMultipart.ts"
 export * as NodePath from "./NodePath.ts"
 
 /**
+ * Opt-in Playwright-backed {@link BrowserDriver} layer for Node.js.
+ *
+ * Install `playwright` in your application and run `npx playwright install` to
+ * download browsers before using this layer.
+ *
+ * @example
+ * ```ts
+ * import { Effect } from "effect"
+ * import * as Browser from "effect/unstable/browser/Browser"
+ * import * as NodePlaywrightBrowser from "@effect/platform-node/NodePlaywrightBrowser"
+ *
+ * const program = Effect.gen(function*() {
+ *   return yield* Browser.withPage({ headless: true }, (page) =>
+ *     Effect.gen(function*() {
+ *       yield* page.goto("https://example.com/")
+ *       return yield* page.title
+ *     })
+ *   )
+ * }).pipe(Effect.scoped, Effect.provide(NodePlaywrightBrowser.layer))
+ * ```
+ *
+ * @since 4.0.0
+ */
+export * as NodePlaywrightBrowser from "./NodePlaywrightBrowser.ts"
+
+/**
  * @since 1.0.0
  */
 export * as NodeRedis from "./NodeRedis.ts"

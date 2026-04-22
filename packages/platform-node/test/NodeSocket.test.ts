@@ -1,5 +1,5 @@
 import { NodeSocket, NodeSocketServer } from "@effect/platform-node"
-import { assert, describe, expect, it } from "@effect/vitest"
+import { assert, describe, it } from "@effect/vitest"
 import { Effect, Queue } from "effect"
 import * as Fiber from "effect/Fiber"
 import * as Stream from "effect/Stream"
@@ -60,8 +60,8 @@ describe("Socket", () => {
           yield* write(new TextEncoder().encode("World"))
         }).pipe(Effect.scoped)
         yield* Effect.promise(async () => {
-          await expect(server).toReceiveMessage(new TextEncoder().encode("Hello"))
-          await expect(server).toReceiveMessage(new TextEncoder().encode("World"))
+          assert.deepStrictEqual(await server.nextMessage, new TextEncoder().encode("Hello"))
+          assert.deepStrictEqual(await server.nextMessage, new TextEncoder().encode("World"))
         })
 
         server.send("Right back at you!")
